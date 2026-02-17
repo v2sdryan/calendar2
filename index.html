@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Calendar - 溫書小幫手</title>
+  <style>
+    :root { --bg:#f6fbff; --card:#ffffff; --line:#d9e7ff; --ink:#1f2a44; --accent:#4f7cff; --ok:#16a34a; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: "PingFang TC","Noto Sans TC",sans-serif; color:var(--ink); background:linear-gradient(180deg,#eaf3ff,#f9fcff); }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 18px; }
+    h1 { margin:0 0 6px; font-size: 28px; }
+    .sub { margin:0 0 16px; color:#4b5b80; }
+    .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
+    button { border:1px solid var(--line); background:white; border-radius:10px; padding:8px 12px; cursor:pointer; }
+    .month { font-weight: 700; color:var(--accent); }
+    .grid { display:grid; grid-template-columns: repeat(7, minmax(0,1fr)); gap:10px; }
+    .dow { text-align:center; font-weight:700; font-size:13px; color:#60709a; }
+    .cell { background:var(--card); border:1px solid var(--line); border-radius:14px; min-height:210px; padding:8px; display:flex; flex-direction:column; }
+    .muted { opacity:.45; }
+    .date { font-weight:700; margin-bottom:6px; }
+    .slot { border:1px dashed #d3def8; border-radius:10px; padding:6px; margin-bottom:6px; }
+    .slot h4 { margin:0 0 4px; font-size:12px; color:#4e5f8a; }
+    ul { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
+    li { display:flex; align-items:flex-start; gap:6px; font-size:13px; }
+    input[type="checkbox"]{ margin-top:2px; }
+    li.done span { text-decoration: line-through; color:#7d8cb0; }
+    .add { display:flex; gap:4px; margin-top:4px; }
+    .add input { width:100%; border:1px solid #d7e3ff; border-radius:8px; padding:5px 6px; font-size:12px; }
+    .add button { padding:5px 8px; font-size:12px; background:#eef4ff; }
+    .tip { font-size:12px; color:#60709a; margin-top:10px; }
+    @media (max-width: 980px){ .grid{grid-template-columns: repeat(2, minmax(0,1fr));} .dow{display:none;} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>📚 Calendar 溫書小幫手</h1>
+    <p class="sub">一格一格排每日溫習，AM / PM checklist 做完就剔 ✅</p>
+    <div class="toolbar">
+      <button id="prev">← 上個月</button>
+      <div class="month" id="monthLabel"></div>
+      <button id="next">下個月 →</button>
+      <button id="todayBtn">今日</button>
+      <button id="saveBtn" disabled>手動儲存</button>
+    </div>
+    <div class="grid" id="weekHeader"></div>
+    <div class="grid" id="calendar"></div>
+    <p class="tip" id="syncTip">資料以 Firebase 雲端為主（跨手機共用同一份）。</p>
+  </div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "REDACTED_ROTATED_KEY",
+  authDomain: "cala-3bc23.firebaseapp.com",
+  projectId: "cala-3bc23",
+  storageBucket: "cala-3bc23.firebasestorage.app",
+  messagingSenderId: "429922557235",
+  appId: "1:429922557235:web:c9a7eca86a28aaaacf3246"
+};
+
+const week = ["日","一","二","三","四","五","六"];
+const weekHeader = document.getElementById('weekHeader');
+const calendar = document.getElementById('calendar');
+const monthLabel = document.getElementById('monthLabel');
+const syncTip = document.getElementById('syncTip');
+let store = {};
+let cursor = new Date();
+cursor.setDate(1);
+let cloudDocRef;
+let cloudReady = false;
+let saveTimer;
+
+week.forEach(d=>{ const el=document.createElement('div'); el.className='dow'; el.textContent='星期'+d; weekHeader.appendChild(el); });
+
+function pad(n){ return String(n).padStart(2,'0'); }
+function k(date,slot){ return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}-${slot}`; }
+
+function saveLocal(){}
+
+async function saveCloudNow(){
+  if(!cloudReady) throw new Error('Firebase 尚未連線完成');
+  await setDoc(cloudDocRef, {
+    updatedAt: serverTimestamp(),
+    data: store
+  }, { merge: true });
+}
+
+function scheduleCloudSave(){
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async ()=>{
+    try {
+      await saveCloudNow();
+      syncTip.textContent = '✅ 已同步到 Firebase 雲端';
+    } catch {
+      syncTip.textContent = '⚠️ 雲端同步失敗，已保存在本機';
+    }
+  }, 450);
+}
+
+function save(){
+  saveLocal();
+  scheduleCloudSave();
+}
+
+function addTask(key, text){
+  if(!text.trim()) return;
+  if(!store[key]) store[key]=[];
+  store[key].push({ text:text.trim(), done:false });
+  save(); render();
+}
+function toggleTask(key, idx){
+  store[key][idx].done = !store[key][idx].done;
+  save(); render();
+}
+
+function slotBlock(dateObj, slot){
+  const key = k(dateObj, slot);
+  const box = document.createElement('div');
+  box.className = 'slot';
+  const title = document.createElement('h4');
+  title.textContent = slot;
+  box.appendChild(title);
+
+  const ul = document.createElement('ul');
+  (store[key] || []).forEach((item, i)=>{
+    const li = document.createElement('li');
+    if(item.done) li.className='done';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = !!item.done;
+    cb.addEventListener('change', ()=>toggleTask(key,i));
+    const span = document.createElement('span'); span.textContent = item.text;
+    li.append(cb, span); ul.appendChild(li);
+  });
+  box.appendChild(ul);
+
+  const add = document.createElement('div'); add.className='add';
+  const inp = document.createElement('input'); inp.placeholder='例如：中文課文第3課';
+  const btn = document.createElement('button'); btn.textContent='＋';
+  btn.addEventListener('click', ()=>addTask(key, inp.value));
+  inp.addEventListener('keydown', (e)=>{ if(e.key==='Enter') addTask(key, inp.value); });
+  add.append(inp, btn); box.appendChild(add);
+  return box;
+}
+
+function render(){
+  calendar.innerHTML = '';
+  const y = cursor.getFullYear();
+  const m = cursor.getMonth();
+  monthLabel.textContent = `${y} 年 ${m+1} 月`;
+
+  const first = new Date(y,m,1);
+  const start = new Date(first); start.setDate(1-first.getDay());
+
+  for(let i=0;i<42;i++){
+    const d = new Date(start); d.setDate(start.getDate()+i);
+    const cell = document.createElement('div');
+    cell.className = 'cell' + (d.getMonth()!==m ? ' muted':'');
+    const dt = document.createElement('div'); dt.className='date'; dt.textContent=`${d.getMonth()+1}/${d.getDate()} (${week[d.getDay()]})`;
+    cell.appendChild(dt);
+    cell.appendChild(slotBlock(d,'AM'));
+    cell.appendChild(slotBlock(d,'PM'));
+    calendar.appendChild(cell);
+  }
+}
+
+document.getElementById('prev').onclick = ()=>{ cursor.setMonth(cursor.getMonth()-1); render(); };
+document.getElementById('next').onclick = ()=>{ cursor.setMonth(cursor.getMonth()+1); render(); };
+document.getElementById('todayBtn').onclick = ()=>{ cursor = new Date(); cursor.setDate(1); render(); };
+
+
+document.getElementById('saveBtn').onclick = async ()=>{
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = '儲存中...';
+  try {
+    await saveCloudNow();
+    syncTip.textContent = '✅ 手動儲存成功（Firebase）';
+    alert('✅ 已成功儲存到 Firebase');
+  } catch (err) {
+    console.error(err);
+    syncTip.textContent = '❌ 儲存失敗：請檢查 Firestore Rules';
+    alert('❌ 儲存失敗，請檢查 Firestore Rules');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+};
+
+async function initFirebaseSync(){
+  try {
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    await signInAnonymously(auth);
+    cloudDocRef = doc(db, 'calendars', 'kids-study-main');
+
+    const snap = await getDoc(cloudDocRef);
+    if (snap.exists() && snap.data()?.data) {
+      store = snap.data().data;
+      saveLocal();
+      syncTip.textContent = '☁️ 已載入 Firebase 雲端資料';
+    } else {
+      cloudReady = true;
+      await saveCloudNow();
+      syncTip.textContent = '☁️ Firebase 已連接（首次建立）';
+    }
+
+    cloudReady = true;
+    document.getElementById('saveBtn').disabled = false;
+    render();
+  } catch (err) {
+    console.error(err);
+    syncTip.textContent = '⚠️ Firebase 連接失敗，未能雲端同步';
+    const b = document.getElementById('saveBtn'); b.disabled = true; b.textContent = '手動儲存（未連線）';
+    render();
+  }
+}
+
+initFirebaseSync();
+</script>
+</body>
+</html>
